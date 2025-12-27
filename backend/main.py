@@ -5,17 +5,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-# --- 1. CONFIGURATION ---
-# We try to get the key from the Cloud Settings first.
-# IF that fails, we use your specific key as the hardcoded backup.
-GEMINI_KEY = os.environ.get("GEMINI_KEY", "AIzaSyADlsZDZmZXPvOL95su2qjLN_3-NK7mzRo")
-genai.configure(api_key=GEMINI_KEY)
+# --- 1. SECURE CONFIGURATION ---
+# The code now ONLY looks for the key in the Cloud Settings (Render).
+# It will NOT work if you don't have the key in the Render Environment Variables.
+GEMINI_KEY = os.environ.get("GEMINI_KEY")
+
+if not GEMINI_KEY:
+    print("CRITICAL WARNING: GEMINI_KEY is missing from environment variables!")
+else:
+    genai.configure(api_key=GEMINI_KEY)
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allows your Netlify frontend to talk to this backend
+    allow_origins=["*"], # Allows your Netlify frontend to connect
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -31,22 +35,22 @@ class StartRequest(BaseModel):
 game_summary = "The adventure begins."
 recent_history = [] 
 
-# --- 3. ROBUST MODEL SELECTOR (THE FIX) ---
+# --- 3. ROBUST MODEL SELECTOR ---
 def get_best_available_model():
     """
-    Scans your API key permissions to find the best working model.
-    Prevents 404 errors by never guessing a name that doesn't exist.
+    Since you are Tier 1, this will prioritize the best models (1.5)
+    but keeps the backup logic just in case.
     """
     try:
+        if not GEMINI_KEY: return None
+
         all_models = list(genai.list_models())
-        # Filter for models that can write text
         text_models = [m for m in all_models if 'generateContent' in m.supported_generation_methods]
         model_names = [m.name for m in text_models]
         
-        if not model_names:
-            return genai.GenerativeModel("gemini-pro")
+        if not model_names: return genai.GenerativeModel("gemini-pro")
 
-        # Priority 1: Gemini 1.5
+        # Priority 1: Gemini 1.5 (Best for Tier 1 users)
         for name in model_names:
             if "gemini-1.5" in name: return genai.GenerativeModel(name)
             
@@ -58,11 +62,10 @@ def get_best_available_model():
         return genai.GenerativeModel(model_names[0])
 
     except Exception as e:
-        print(f"Model Selection Error: {e}")
+        print(f"Model Error: {e}")
         return genai.GenerativeModel("gemini-pro")
 
 def update_summary(old_text):
-    """Summarizes old text so memory doesn't get too full."""
     global game_summary
     try:
         model = get_best_available_model()
@@ -81,12 +84,11 @@ async def start_game(request: StartRequest):
     global game_summary, recent_history
     recent_history = []
     
-    # Set the initial state based on choice
     game_summary = f"The player has started a {request.genre} adventure."
     
     try:
         model = get_best_available_model()
-        prompt = f"You are a Dungeon Master for a {request.genre} game. Describe the starting scene in 2 sentences to the player."
+        prompt = f"You are a Dungeon Master for a {request.genre} game. Describe the starting scene in 2 sentences. Address the player directly."
         response = model.generate_content(prompt)
         opening_scene = response.text
     except:
@@ -126,11 +128,11 @@ async def play_turn(request: PlayRequest):
 
 @app.post("/undo")
 async def undo_turn():
-    """Removes the last turn (Player action + DM response)."""
+    """Removes the last turn."""
     global recent_history
     if len(recent_history) >= 2:
-        recent_history.pop() # Remove DM
-        recent_history.pop() # Remove Player
+        recent_history.pop()
+        recent_history.pop()
         return {"message": "Undone", "remaining": recent_history}
     return {"message": "Nothing to undo"}
 
@@ -144,3 +146,4 @@ async def reset_game():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
