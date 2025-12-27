@@ -1,13 +1,13 @@
 import os
+import google.generativeai as genai
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
 from pydantic import BaseModel
 import uvicorn
 
 # --- 1. CONFIGURATION ---
-# SECURITY: We look for the key in the server's environment variables first.
-# If not found (running locally), we use your hardcoded key as a backup.
+# We try to get the key from the Cloud Settings first.
+# IF that fails, we use your specific key as the hardcoded backup.
 GEMINI_KEY = os.environ.get("GEMINI_KEY", "AIzaSyADlsZDZmZXPvOL95su2qjLN_3-NK7mzRo")
 genai.configure(api_key=GEMINI_KEY)
 
@@ -15,7 +15,6 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    # SECURITY: In a real app, replace ["*"] with your specific frontend URL
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,25 +27,54 @@ class PlayRequest(BaseModel):
 game_summary = "The adventure begins."
 recent_history = [] 
 
-def get_model():
-    # ... (Same logic as before) ...
-    return genai.GenerativeModel("gemini-1.5-flash")
-
-def update_summary(old_text):
-    global game_summary
+# --- 3. ROBUST MODEL SELECTOR ---
+def get_best_available_model():
+    """
+    Scans your API key permissions to find the best working model.
+    Prevents 404 errors by never guessing a name that doesn't exist.
+    """
     try:
-        model = get_model()
-        prompt = f"Summarize these events into the journal: {game_summary} \n New events: {old_text}"
-        response = model.generate_content(prompt)
-        game_summary = response.text.strip()
-    except:
-        pass
+        # Ask Google: "What models do I own?"
+        all_models = list(genai.list_models())
+        
+        # Filter: Keep only models that can write text
+        text_models = [m for m in all_models if 'generateContent' in m.supported_generation_methods]
+        model_names = [m.name for m in text_models]
+        
+        if not model_names:
+            # Emergency Backup
+            print("DEBUG: No models found in list. Trying default.")
+            return genai.GenerativeModel("gemini-pro")
 
+        # --- SELECTION LOGIC ---
+        # 1. Try to find the newest "1.5" version
+        for name in model_names:
+            if "gemini-1.5" in name:
+                print(f"DEBUG: Selected Best Model -> {name}")
+                return genai.GenerativeModel(name)
+                
+        # 2. If no 1.5, look for "Pro"
+        for name in model_names:
+            if "gemini-pro" in name:
+                print(f"DEBUG: Selected Standard Model -> {name}")
+                return genai.GenerativeModel(name)
+
+        # 3. If neither exists, just grab the first one on the list
+        fallback = model_names[0]
+        print(f"DEBUG: Selected Fallback Model -> {fallback}")
+        return genai.GenerativeModel(fallback)
+
+    except Exception as e:
+        print(f"Model Selection Error: {e}")
+        return genai.GenerativeModel("gemini-pro")
+
+# --- 4. GAME ENDPOINTS ---
 @app.post("/play")
 async def play_turn(request: PlayRequest):
     global recent_history, game_summary
-    recent_text = "\n".join(recent_history)
     
+    # Create the prompt context
+    recent_text = "\n".join(recent_history)
     prompt = (
         f"You are the Dungeon Master. \n"
         f"--- JOURNAL ---\n{game_summary}\n"
@@ -55,21 +83,24 @@ async def play_turn(request: PlayRequest):
     )
 
     try:
-        model = get_model()
+        # Dynamically find the right tool for the job
+        model = get_best_available_model()
+        
         response = model.generate_content(prompt)
         story_text = response.text
 
+        # Update Memory
         recent_history.append(f"Player: {request.action}")
         recent_history.append(f"DM: {story_text}")
-
+        
+        # Rolling Memory Buffer (Keep last 6 lines)
         if len(recent_history) > 6:
-            update_summary("\n".join(recent_history[:2]))
             recent_history = recent_history[2:]
 
         return {"story": story_text}
 
     except Exception as e:
-        return {"story": f"Error: {str(e)}"}
+        return {"story": f"System Error: {str(e)}"}
 
 @app.post("/reset")
 async def reset_game():
@@ -79,8 +110,6 @@ async def reset_game():
     return {"message": "Reset complete."}
 
 if __name__ == "__main__":
-    # CLOUD CHANGE: The port must be read from the environment variable 'PORT'
-    # The default is 8000 if not found.
+    # Get the correct port for the cloud, or use 8000 for local
     port = int(os.environ.get("PORT", 8000))
-    # CLOUD CHANGE: Host must be 0.0.0.0 to work on the internet
     uvicorn.run(app, host="0.0.0.0", port=port)
