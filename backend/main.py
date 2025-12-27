@@ -15,6 +15,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
+    # SECURITY: allows the frontend to talk to the backend from anywhere
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,11 +24,13 @@ app.add_middleware(
 class PlayRequest(BaseModel):
     action: str
 
-# --- 2. MEMORY SYSTEM ---
-game_summary = "The adventure begins."
+# --- 2. MEMORY SYSTEM (The Brain) ---
+# The Journal: Summarizes the long-term past
+game_summary = "The adventure begins. The player stands ready."
+# Recent History: Keeps the exact text of the last few turns
 recent_history = [] 
 
-# --- 3. ROBUST MODEL SELECTOR ---
+# --- 3. ROBUST MODEL SELECTOR (The Fix) ---
 def get_best_available_model():
     """
     Scans your API key permissions to find the best working model.
@@ -43,43 +46,62 @@ def get_best_available_model():
         
         if not model_names:
             # Emergency Backup
-            print("DEBUG: No models found in list. Trying default.")
+            print("DEBUG: No models found. Defaulting to Pro.")
             return genai.GenerativeModel("gemini-pro")
 
         # --- SELECTION LOGIC ---
-        # 1. Try to find the newest "1.5" version
+        # 1. Try to find "gemini-1.5" (Newest/Best)
         for name in model_names:
             if "gemini-1.5" in name:
-                print(f"DEBUG: Selected Best Model -> {name}")
                 return genai.GenerativeModel(name)
                 
-        # 2. If no 1.5, look for "Pro"
+        # 2. Try to find "gemini-pro" (Standard)
         for name in model_names:
             if "gemini-pro" in name:
-                print(f"DEBUG: Selected Standard Model -> {name}")
                 return genai.GenerativeModel(name)
 
-        # 3. If neither exists, just grab the first one on the list
-        fallback = model_names[0]
-        print(f"DEBUG: Selected Fallback Model -> {fallback}")
-        return genai.GenerativeModel(fallback)
+        # 3. Just grab the first one available
+        return genai.GenerativeModel(model_names[0])
 
     except Exception as e:
         print(f"Model Selection Error: {e}")
         return genai.GenerativeModel("gemini-pro")
 
-# --- 4. GAME ENDPOINTS ---
+# --- 4. MEMORY SUMMARIZER ---
+def update_summary(old_text):
+    """
+    Condenses old chat logs into the main journal so the game never crashes from being too long.
+    """
+    global game_summary
+    try:
+        model = get_best_available_model()
+        prompt = (
+            f"We are tracking a text adventure game.\n"
+            f"CURRENT SUMMARY: {game_summary}\n"
+            f"NEW EVENTS TO ADD: {old_text}\n"
+            f"TASK: Rewrite the Current Summary to include the New Events. "
+            f"Keep it concise (max 3 sentences). Focus on inventory, location, and major plot changes."
+        )
+        response = model.generate_content(prompt)
+        if response.text:
+            game_summary = response.text.strip()
+            print(f"DEBUG: Memory Updated -> {game_summary}")
+    except:
+        pass
+
+# --- 5. GAME ENDPOINTS ---
 @app.post("/play")
 async def play_turn(request: PlayRequest):
     global recent_history, game_summary
     
-    # Create the prompt context
+    # Create the prompt context (Journal + Recent Chat + New Action)
     recent_text = "\n".join(recent_history)
     prompt = (
         f"You are the Dungeon Master. \n"
-        f"--- JOURNAL ---\n{game_summary}\n"
+        f"--- JOURNAL (Long Term Memory) ---\n{game_summary}\n"
         f"--- RECENT CHAT ---\n{recent_text}\n"
         f"PLAYER: {request.action}\n"
+        f"INSTRUCTION: Narrate the result. React logically to the journal and conversation."
     )
 
     try:
@@ -93,9 +115,14 @@ async def play_turn(request: PlayRequest):
         recent_history.append(f"Player: {request.action}")
         recent_history.append(f"DM: {story_text}")
         
-        # Rolling Memory Buffer (Keep last 6 lines)
+        # Rolling Memory Buffer (Keep last 6 lines, summarize the rest)
         if len(recent_history) > 6:
+            # Take the oldest 2 lines
+            oldest_interaction = "\n".join(recent_history[:2])
+            # Remove them from active list
             recent_history = recent_history[2:]
+            # Send them to be summarized
+            update_summary(oldest_interaction)
 
         return {"story": story_text}
 
